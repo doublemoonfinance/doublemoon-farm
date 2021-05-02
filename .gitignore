@@ -3,7 +3,7 @@
 
 node_modules
 
-#Buidler files
+#Hardhat files
 cache
 artifacts
 coverage
@@ -17,3 +17,5 @@ coverage.json
 
 #VSCode 
 .vscode/settings.json
+
+secrets.json
