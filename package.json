@@ -42,6 +42,7 @@
   },
   "dependencies": {
     "@pancakeswap/pancake-swap-lib": "^0.0.1",
-    "hardhat-preprocessor": "^0.1.3"
+    "hardhat-preprocessor": "^0.1.3",
+    "@openzeppelin/test-helpers": "^0.5.6"
   }
 }
