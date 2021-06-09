@@ -3,37 +3,20 @@
 pragma solidity 0.6.12;
 
 import "./libs/BEP20.sol";
-import "./DoubleMoonCat.sol";
 
-// MoonLounge with Governance.
-contract MoonLounge is BEP20("Moon Lounge Token", "MOONLOUNGE") {
-    /// @notice Creates `_amount` token to `_to`. Must only be called by the owner (MoonMaster).
-    function mint(address _to, uint256 _amount) public onlyOwner {
-        _mint(_to, _amount);
-        _moveDelegates(address(0), _delegates[_to], _amount);
-    }
+contract DoubleMoonCat is BEP20("DoubleMoon Cat", "DMC") {
+    uint256 private _cap = 100000000e18;
+    uint256 private _totalLock;
 
-    function burn(address _from, uint256 _amount) public onlyOwner {
-        _burn(_from, _amount);
-        _moveDelegates(_delegates[_from], address(0), _amount);
-    }
+    uint256 public lockFromBlock;
+    uint256 public lockToBlock;
+    uint256 public manualMintLimit = 5000000e18;
+    uint256 public manualMinted = 0;
 
-    // The DMC TOKEN!
-    DoubleMoonCat public token;
+    mapping(address => uint256) private _locks;
+    mapping(address => uint256) private _lastUnlockBlock;
 
-    constructor(DoubleMoonCat _token) public {
-        token = _token;
-    }
-
-    // Safe token transfer function, just in case if rounding error causes pool to not have enough token.
-    function safeTokenTransfer(address _to, uint256 _amount) public onlyOwner {
-        uint256 tokenBal = token.balanceOf(address(this));
-        if (_amount > tokenBal) {
-            token.transfer(_to, tokenBal);
-        } else {
-            token.transfer(_to, _amount);
-        }
-    }
+    event Lock(address indexed to, uint256 value);
 
     // Copied and modified from YAM code:
     // https://github.com/yam-finance/yam-protocol/blob/master/contracts/token/YAMGovernanceStorage.sol
@@ -41,7 +24,7 @@ contract MoonLounge is BEP20("Moon Lounge Token", "MOONLOUNGE") {
     // Which is copied and modified from COMPOUND:
     // https://github.com/compound-finance/compound-protocol/blob/master/contracts/Governance/Comp.sol
 
-    /// @notice A record of each accounts delegate
+    // @notice A record of each accounts delegate
     mapping(address => address) internal _delegates;
 
     /// @notice A checkpoint for marking number of votes from a given block
@@ -291,5 +274,143 @@ contract MoonLounge is BEP20("Moon Lounge Token", "MOONLOUNGE") {
             chainId := chainid()
         }
         return chainId;
+    }
+
+    constructor(uint256 _lockFromBlock, uint256 _lockToBlock) public {
+        require(_lockToBlock > _lockFromBlock, "DMC::constructor: lockToBlock < lockFromBlock");
+        lockFromBlock = _lockFromBlock;
+        lockToBlock = _lockToBlock;
+
+        manualMint(msg.sender, 250000e18);
+    }
+
+    function setReleaseBlock(uint256 _lockFromBlock, uint256 _lockToBlock) public onlyOwner {
+        require(_lockToBlock > _lockFromBlock, "DMC::setReleaseBlock: lockToBlock < lockFromBlock");
+        lockFromBlock = _lockFromBlock;
+        lockToBlock = _lockToBlock;
+    }
+
+    function manualMint(address _to, uint256 _amount) public onlyOwner {
+        require(manualMinted <= manualMintLimit, "DMC::manualMint: mint limit exceeded");
+        manualMinted = manualMinted.add(_amount);
+        mint(_to, _amount);
+    }
+
+    /// @notice Creates `_amount` token to `_to`. Must only be called by the owner (MoonMaster).
+    function mint(address _to, uint256 _amount) public onlyOwner {
+        require(totalSupply().add(_amount) <= _cap, "DMC::mint: cap exceeded");
+        _mint(_to, _amount);
+        _moveDelegates(address(0), _delegates[_to], _amount);
+    }
+
+    /**
+     * @dev Destroys `amount` tokens from the caller.
+     *
+     * See {BEP20-_burn}.
+     */
+    function burn(uint256 amount) public virtual returns (bool) {
+        _burn(_msgSender(), amount);
+        return true;
+    }
+
+    /**
+     * @dev Destroys `amount` tokens from `account`, deducting from the caller's
+     * allowance.
+     *
+     * See {BEP20-_burn} and {BEP20-allowance}.
+     *
+     * Requirements:
+     *
+     * - the caller must have allowance for ``accounts``'s tokens of at least
+     * `amount`.
+     */
+    function burnFrom(address account, uint256 amount) public virtual returns (bool) {
+        _burnFrom(account, amount);
+        return true;
+    }
+
+    function totalBalanceOf(address _account) public view returns (uint256) {
+        return _locks[_account].add(balanceOf(_account));
+    }
+
+    function lockOf(address _account) public view returns (uint256) {
+        return _locks[_account];
+    }
+
+    function lastUnlockBlock(address _account) public view returns (uint256) {
+        return _lastUnlockBlock[_account];
+    }
+
+    function lock(address _account, uint256 _amount) public onlyOwner {
+        require(_account != address(0), "DMC::lock: cannot lock to the zero address");
+        require(_amount <= balanceOf(_account), "DMC::lock: lock amount over balance");
+
+        _transfer(_account, address(this), _amount);
+
+        _locks[_account] = _locks[_account].add(_amount);
+        _totalLock = _totalLock.add(_amount);
+
+        if (_lastUnlockBlock[_account] < lockFromBlock) {
+            _lastUnlockBlock[_account] = lockFromBlock;
+        }
+
+        emit Lock(_account, _amount);
+    }
+
+    function canUnlockAmount(address _account) public view returns (uint256) {
+        if (block.number < lockFromBlock) {
+            return 0;
+        } else if (block.number >= lockToBlock) {
+            return _locks[_account];
+        } else {
+            uint256 releasedBlock = block.number.sub(_lastUnlockBlock[_account]);
+            uint256 blockLeft = lockToBlock.sub(_lastUnlockBlock[_account]);
+            return _locks[_account].mul(releasedBlock).div(blockLeft);
+        }
+    }
+
+    function unlock() public {
+        require(_locks[msg.sender] > 0, "DMC::unlock: cannot unlock");
+
+        uint256 amount = canUnlockAmount(msg.sender);
+        // just for sure
+        if (amount > balanceOf(address(this))) {
+            amount = balanceOf(address(this));
+        }
+
+        _transfer(address(this), msg.sender, amount);
+        _locks[msg.sender] = _locks[msg.sender].sub(amount);
+        _lastUnlockBlock[msg.sender] = block.number;
+        _totalLock = _totalLock.sub(amount);
+    }
+
+    // This function is for dev address migrate all balance to a multi sig address
+    function transferAll(address _to) public {
+        _locks[_to] = _locks[_to].add(_locks[msg.sender]);
+
+        if (_lastUnlockBlock[_to] < lockFromBlock) {
+        _lastUnlockBlock[_to] = lockFromBlock;
+        }
+
+        if (_lastUnlockBlock[_to] < _lastUnlockBlock[msg.sender]) {
+        _lastUnlockBlock[_to] = _lastUnlockBlock[msg.sender];
+        }
+
+        _locks[msg.sender] = 0;
+        _lastUnlockBlock[msg.sender] = 0;
+
+        _transfer(msg.sender, _to, balanceOf(msg.sender));
+    }
+
+    function cap() public view returns (uint256) {
+        return _cap;
+    }
+
+    function circulatingSupply() public view returns (uint256) {
+        return totalSupply().sub(_totalLock);
+    }
+
+    function totalLock() public view returns (uint256) {
+        return _totalLock;
     }
 }
